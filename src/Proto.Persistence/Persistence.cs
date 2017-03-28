@@ -5,52 +5,55 @@
 // -----------------------------------------------------------------------
 
 using System;
-using Google.Protobuf;
+using System.Threading.Tasks;
 
 namespace Proto.Persistence
 {
     public class Persistence
     {
         public IProviderState State { get; set; }
-        public int EventIndex { get; set; }
+        public ulong EventIndex { get; set; }
         public IContext Context { get; set; }
-        public bool Recovering { get; set; }
         public string Name => Context.Self.Id;
 
-        public void Init(IProvider provider, IContext context)
+        public async Task InitAsync(IProvider provider, IContext context)
         {
             State = provider.GetState();
             Context = context;
-            Recovering = true;
 
-            State.Restart();
-            var t = State.GetSnapshot(Name);
+            await Context.ReceiveAsync(new RecoveryStarted());
+
+            var t = await State.GetSnapshotAsync(Name);
+
             if (t != null)
             {
                 EventIndex = t.Item2;
-                Context.ReceiveAsync(t.Item1).Wait();
+                await Context.ReceiveAsync(new RecoverSnapshot(t.Item1));
             }
-            State.GetEvents(Name, EventIndex, e =>
+
+            await State.GetEventsAsync(Name, EventIndex, e =>
             {
-                Context.ReceiveAsync(e).Wait();
+                Context.ReceiveAsync(new RecoverEvent(e)).Wait();
                 EventIndex++;
             });
+            
+            await Context.ReceiveAsync(new RecoveryCompleted());
         }
 
-        public void PersistReceive(IMessage message)
+        public async Task PersistReceiveAsync(object message)
         {
-            State.PersistEvent(Name, EventIndex, message);
+            var persistEventIndex = EventIndex;
+
+            await State.PersistEventAsync(Name, persistEventIndex, message);
+
             EventIndex++;
-            Context.ReceiveAsync(message).Wait();
-            if (State.GetSnapshotInterval() == 0)
-            {
-                Context.ReceiveAsync(new RequestSnapshot()).Wait();
-            }
+
+            await Context.ReceiveAsync(new PersistedEvent(persistEventIndex, message));
         }
 
-        public void PersistSnapshot(IMessage snapshot)
+        public async Task PersistSnapshotAsync(object snapshot)
         {
-            State.PersistSnapshot(Name, EventIndex, snapshot);
+            await State.PersistSnapshotAsync(Name, EventIndex, snapshot);
         }
 
         public static Func<Receive, Receive> Using(IProvider provider)
@@ -59,27 +62,54 @@ namespace Proto.Persistence
             {
                 switch (context.Message)
                 {
-                    case Started started:
-                        await next(context);
-                        context.Self.Tell(new Replay());
-                        break;
-                    case Replay replay:
+                    case Started _:
                         var p = context.Actor as IPersistentActor;
                         if (p != null)
                         {
                             p.Persistence = new Persistence();
-                            p.Persistence.Init(provider, context);
+                            await p.Persistence.InitAsync(provider, context);
                         }
                         break;
-                    default:
-                        await next(context);
-                        break;
                 }
+                await next(context);
             };
         }
     }
 
-    public class RequestSnapshot
+    public class RequestSnapshot { }
+
+    public class RecoverSnapshot
     {
+        public RecoverSnapshot(object snapshot)
+        {
+            Snapshot = snapshot;
+        }
+        
+        public object Snapshot { get; }
+    }
+
+    public class RecoverEvent
+    {
+        public RecoverEvent(object message)
+        {
+            Message = message;
+        }
+        
+        public object Message { get; }
+    }
+
+    public class RecoveryStarted { }
+    public class RecoveryCompleted { }
+
+    public class PersistedEvent
+    {
+        public PersistedEvent(ulong eventIndex, object message)
+        {
+            EventIndex = eventIndex;
+            Message = message;
+        }
+
+        public ulong EventIndex { get; }
+        public object Message { get; }
     }
 }

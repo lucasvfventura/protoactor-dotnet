@@ -14,11 +14,11 @@ class Program
     static void Main(string[] args)
     {
         Func<IMailbox> unboundedMailbox =
-            () => new DefaultMailbox(new UnboundedMailboxQueue(), new UnboundedMailboxQueue());
-        Func<IMailbox> boundedMailbox =
-            () => new DefaultMailbox(new BoundedMailboxQueue(1024 * 1024), new BoundedMailboxQueue(1024 * 1024));
+            () => UnboundedMailbox.Create();
+        //Func<IMailbox> boundedMailbox =
+        //    () => BoundedMailbox.Create(1024 * 1024);
 
-        RunTest(boundedMailbox, "Bounded mailbox");
+        //RunTest(boundedMailbox, "Bounded mailbox");
         RunTest(unboundedMailbox, "Unbounded mailbox");
 
         Console.ReadLine();

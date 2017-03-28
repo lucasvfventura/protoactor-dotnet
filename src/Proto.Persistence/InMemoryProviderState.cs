@@ -7,35 +7,25 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using Google.Protobuf;
+using System.Threading.Tasks;
 
 namespace Proto.Persistence
 {
     internal class InMemoryProviderState : IProviderState
     {
-        private readonly IDictionary<string, List<object>> _events = new ConcurrentDictionary<string, List<object>>();
+        private readonly ConcurrentDictionary<string, List<object>> _events = new ConcurrentDictionary<string, List<object>>();
 
-        private readonly IDictionary<string, Tuple<object, int>> _snapshots =
-            new Dictionary<string, Tuple<object, int>>();
+        private readonly IDictionary<string, Tuple<object, ulong>> _snapshots =
+            new Dictionary<string, Tuple<object, ulong>>();
 
-        public void Restart()
+        public Task<Tuple<object, ulong>> GetSnapshotAsync(string actorName)
         {
+            Tuple<object, ulong> snapshot;
+            _snapshots.TryGetValue(actorName, out snapshot);
+            return Task.FromResult(snapshot);
         }
 
-        public int GetSnapshotInterval()
-        {
-            return 0;
-        }
-
-        public Tuple<object, int> GetSnapshot(string actorName)
-        {
-            Tuple<object, int> snapshot;
-            return _snapshots.TryGetValue(actorName, out snapshot)
-                ? snapshot
-                : null;
-        }
-
-        public void GetEvents(string actorName, int eventIndexStart, Action<object> callback)
+        public Task GetEventsAsync(string actorName, ulong eventIndexStart, Action<object> callback)
         {
             List<object> events;
             if (_events.TryGetValue(actorName, out events))
@@ -45,20 +35,31 @@ namespace Proto.Persistence
                     callback(e);
                 }
             }
+            return Task.FromResult(0);
         }
 
-        public void PersistEvent(string actorName, int eventIndex, IMessage @event)
+        public Task PersistEventAsync(string actorName, ulong eventIndex, object @event)
         {
-            List<object> events;
-            if (_events.TryGetValue(actorName, out events))
-            {
-                events.Add(@event);
-            }
+            var events = _events.GetOrAdd(actorName, new List<object>());
+            events.Add(@event);
+
+            return Task.FromResult(0);
         }
 
-        public void PersistSnapshot(string actorName, int eventIndex, IMessage snapshot)
+        public Task PersistSnapshotAsync(string actorName, ulong eventIndex, object snapshot)
         {
             _snapshots[actorName] = Tuple.Create((object) snapshot, eventIndex);
+            return Task.FromResult(0);
+        }
+
+        public Task DeleteEventsAsync(string actorName, ulong fromEventIndex)
+        {
+            return Task.FromResult(0);
+        }
+
+        public Task DeleteSnapshotsAsync(string actorName, ulong fromEventIndex)
+        {
+            return Task.FromResult(0);
         }
     }
 }

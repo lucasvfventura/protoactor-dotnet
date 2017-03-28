@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Proto.Mailbox;
 
 namespace Proto
@@ -16,7 +17,8 @@ namespace Proto
     public class Context : IMessageInvoker, IContext, ISupervisor
     {
         private readonly Stack<Receive> _behavior;
-        private readonly Receive _middleware;
+        private readonly Receive _receiveMiddleware;
+        private readonly Sender _senderMiddleware;
         private readonly Func<IActor> _producer;
         private readonly ISupervisorStrategy _supervisorStrategy;
         private HashSet<PID> _children;
@@ -29,21 +31,32 @@ namespace Proto
         private bool _stopping;
         private HashSet<PID> _watchers;
         private HashSet<PID> _watching;
+        private readonly ILogger logger = Log.CreateLogger<Context>();
 
 
-        public Context(Func<IActor> producer, ISupervisorStrategy supervisorStrategy, Receive middleware, PID parent)
+        public Context(Func<IActor> producer, ISupervisorStrategy supervisorStrategy, Receive receiveMiddleware, Sender senderMiddleware, PID parent)
         {
             _producer = producer;
             _supervisorStrategy = supervisorStrategy;
-            _middleware = middleware;
+            _receiveMiddleware = receiveMiddleware;
+            _senderMiddleware = senderMiddleware;
             Parent = parent;
             _behavior = new Stack<Receive>();
             _behavior.Push(ActorReceive);
 
             IncarnateActor();
+
+            //fast path
+            if (parent != null)
+            {
+                _watchers = new HashSet<PID>
+                {
+                    parent
+                };
+            }
         }
 
-        public IReadOnlyCollection<PID> Children => _children.ToList();
+        public IReadOnlyCollection<PID> Children => _children?.ToList();
         public IActor Actor { get; private set; }
         public PID Parent { get; }
         public PID Self { get; internal set; }
@@ -96,7 +109,13 @@ namespace Proto
                 _children = new HashSet<PID>();
             }
             _children.Add(pid);
-            Watch(pid);
+
+            //fast path add watched
+            if (_watching == null)
+            {
+                _watching = new HashSet<PID>();
+            }
+            _watching.Add(pid);
             return pid;
         }
 
@@ -189,28 +208,28 @@ namespace Proto
                         return HandleTerminatedAsync(t);
                     case Watch w:
                         HandleWatch(w);
-                        return Task.CompletedTask;
+                        return Task.FromResult(0);
                     case Unwatch uw:
                         HandleUnwatch(uw);
-                        return Task.CompletedTask;
+                        return Task.FromResult(0);
                     case Failure f:
                         HandleFailure(f);
-                        return Task.CompletedTask;
+                        return Task.FromResult(0);
                     case Restart r:
                         return HandleRestartAsync();
                     case SuspendMailbox sm:
-                        return Task.CompletedTask;
+                        return Task.FromResult(0);
                     case ResumeMailbox rm:
-                        return Task.CompletedTask;
+                        return Task.FromResult(0);
                     default:
-                        Console.WriteLine("Unknown system message {0}", msg);
-                        return Task.CompletedTask;
+                        logger.LogWarning("Unknown system message {0}", msg);
+                        return Task.FromResult(0);
                 }
             }
             catch (Exception x)
             {
-                Console.WriteLine("Error handling SystemMessage {0}", x);
-                return Task.CompletedTask;
+                logger.LogError("Error handling SystemMessage {0}", x);
+                return Task.FromResult(0);
             }
         }
 
@@ -246,7 +265,7 @@ namespace Proto
         {
             if (_restartStatistics == null)
             {
-                _restartStatistics = new RestartStatistics(1, null);
+                _restartStatistics = new RestartStatistics(0, null);
             }
             var failure = new Failure(Self, reason, _restartStatistics);
             if (Parent == null)
@@ -266,9 +285,33 @@ namespace Proto
             Parent.SendSystemMessage(new Failure(who, reason, _restartStatistics));
         }
 
+        public void RestartChildren(params PID[] pids)
+        {
+            for (int i = 0; i < pids.Length; i++)
+            {
+                pids[i].SendSystemMessage(Restart.Instance);
+            }
+        }
+
+        public void StopChildren(params PID[] pids)
+        {
+            for (int i = 0; i < pids.Length; i++)
+            {
+                pids[i].SendSystemMessage(Stop.Instance);
+            }
+        }
+
+        public void ResumeChildren(params PID[] pids)
+        {
+            for (int i = 0; i < pids.Length; i++)
+            {
+                pids[i].SendSystemMessage(ResumeMailbox.Instance);
+            }
+        }
+
         internal static Task DefaultReceive(IContext context)
         {
-            var c = (Context) context;
+            var c = (Context)context;
             if (c.Message is PoisonPill)
             {
                 c.Self.Stop();
@@ -277,14 +320,63 @@ namespace Proto
             return c._receive(context);
         }
 
+        internal static Task DefaultSender(IContext context, PID target, MessageEnvelope envelope)
+        {
+            target.Ref.SendUserMessage(target, envelope.Message, envelope.Sender);
+            return Task.FromResult(0);
+        }
+
         private Task ProcessMessageAsync(object msg)
         {
             Message = msg;
-            if (_middleware != null)
+            if (_receiveMiddleware != null)
             {
-                return _middleware(this);
+                return _receiveMiddleware(this);
             }
             return DefaultReceive(this);
+        }
+
+        public void Tell(PID target, object message)
+        {
+            SendUserMessage(target, message, null);
+        }
+
+        public void Request(PID target, object message)
+        {
+            SendUserMessage(target, message, Self);
+        }
+
+        public Task<T> RequestAsync<T>(PID target, object message, TimeSpan timeout)
+            => RequestAsync(target, message, new FutureProcess<T>(timeout));
+
+        public Task<T> RequestAsync<T>(PID target, object message, CancellationToken cancellationToken)
+            => RequestAsync(target, message, new FutureProcess<T>(cancellationToken));
+
+        public Task<T> RequestAsync<T>(PID target, object message)
+            => RequestAsync(target, message, new FutureProcess<T>());
+
+        private Task<T> RequestAsync<T>(PID target, object message, FutureProcess<T> future)
+        {
+            SendUserMessage(target, message, future.PID);
+            return future.Task;
+        }
+
+        private void SendUserMessage(PID target, object message, PID sender)
+        {
+            if (_senderMiddleware != null)
+            {
+                var messageEnvelope = message as MessageEnvelope ?? new MessageEnvelope
+                {
+                    Message = message,
+                    Header = new MessageHeader(),
+                    Sender = sender
+                };
+                _senderMiddleware(this, target, messageEnvelope);
+            }
+            else
+            {
+                target.Ref.SendUserMessage(target, message, sender);
+            }
         }
 
         private void IncarnateActor()
@@ -416,7 +508,8 @@ namespace Proto
 
         private Task ActorReceive(IContext ctx)
         {
-            return Actor.ReceiveAsync(ctx);
+            var task = Actor.ReceiveAsync(ctx);
+            return task;
         }
 
         private void ResetReceiveTimeout()

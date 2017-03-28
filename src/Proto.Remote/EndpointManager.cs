@@ -24,7 +24,13 @@ namespace Proto.Remote
 
     public class EndpointManager : IActor
     {
+        private readonly RemoteConfig _config;
         private readonly Dictionary<string, Endpoint> _connections = new Dictionary<string, Endpoint>();
+
+        public EndpointManager(RemoteConfig config)
+        {
+            _config = config;
+        }
 
         public Task ReceiveAsync(IContext context)
         {
@@ -59,7 +65,7 @@ namespace Proto.Remote
                     endpoint.Watcher.Tell(msg);
                     return Actor.Done;
                 }
-                case MessageEnvelope msg:
+                case RemoteDeliver msg:
                 {
                     var endpoint = EnsureConnected(msg.Target.Address, context);
                     endpoint.Writer.Tell(msg);
@@ -94,11 +100,11 @@ namespace Proto.Remote
             return watcher;
         }
 
-        private static PID SpawnWriter(string address, IContext context)
+        private PID SpawnWriter(string address, IContext context)
         {
             var writerProps =
-                Actor.FromProducer(() => new EndpointWriter(address))
-                    .WithMailbox(() => new EndpointWriterMailbox());
+                Actor.FromProducer(() => new EndpointWriter(address, _config.ChannelOptions, _config.CallOptions, _config.ChannelCredentials))
+                    .WithMailbox(() => new EndpointWriterMailbox(_config.EndpointWriterBatchSize));
             var writer = context.Spawn(writerProps);
             return writer;
         }

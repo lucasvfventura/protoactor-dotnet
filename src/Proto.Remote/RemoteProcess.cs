@@ -33,12 +33,12 @@ namespace Proto.Remote
             if (msg is Watch w)
             {
                 var rw = new RemoteWatch(w.Watcher, _pid);
-                RemotingSystem.EndpointManagerPid.Tell(rw);
+                Remote.EndpointManagerPid.Tell(rw);
             }
             else if (msg is Unwatch uw)
             {
                 var ruw = new RemoteUnwatch(uw.Watcher, _pid);
-                RemotingSystem.EndpointManagerPid.Tell(ruw);
+                Remote.EndpointManagerPid.Tell(ruw);
             }
             else
             {
@@ -51,19 +51,36 @@ namespace Proto.Remote
             if (msg is IMessage)
             {
                 var imsg = (IMessage) msg;
-                var env = new MessageEnvelope
+                var env = new RemoteDeliver(imsg, pid, sender);
+
+                /*
+                 *
                 {
                     Target = pid,
                     Sender = sender,
                     MessageData = Serialization.Serialize(imsg),
                     TypeName = imsg.Descriptor.File.Package + "." + imsg.Descriptor.Name
-                };
-                RemotingSystem.EndpointManagerPid.Tell(env);
+                }; 
+                 */
+                Remote.EndpointManagerPid.Tell(env);
             }
             else
             {
                 throw new NotSupportedException("Non protobuf message");
             }
         }
+    }
+
+    public class RemoteDeliver
+    {
+        public RemoteDeliver(IMessage message, PID target,PID sender)
+        {
+            Message = message;
+            Target = target;
+            Sender = sender;
+        }
+        public IMessage Message { get;  }
+        public PID Target { get;  }
+        public PID Sender { get;  }
     }
 }

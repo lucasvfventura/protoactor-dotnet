@@ -4,14 +4,13 @@
 //  </copyright>
 // -----------------------------------------------------------------------
 
-using Google.Protobuf;
 using Newtonsoft.Json;
 
 namespace Proto.Persistence.Couchbase
 {
     internal class Envelope
     {
-        public Envelope(string actorName, int eventIndex, IMessage @event, string type)
+        public Envelope(string actorName, ulong eventIndex, object @event, string type)
         {
             ActorName = actorName;
             EventIndex = eventIndex;
@@ -21,8 +20,8 @@ namespace Proto.Persistence.Couchbase
         }
 
         public string ActorName { get; }
-        public int EventIndex { get; }
-        public IMessage Event { get; }
+        public ulong EventIndex { get; }
+        public object Event { get; }
         public string Type { get; }
 
         [JsonIgnore]

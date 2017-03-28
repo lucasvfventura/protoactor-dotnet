@@ -5,17 +5,17 @@
 // -----------------------------------------------------------------------
 
 using System;
-using Google.Protobuf;
+using System.Threading.Tasks;
 
 namespace Proto.Persistence
 {
     public interface IProviderState
     {
-        void GetEvents(string actorName, int eventIndexStart, Action<object> callback);
-        Tuple<object, int> GetSnapshot(string actorName);
-        int GetSnapshotInterval();
-        void PersistEvent(string actorName, int eventIndex, IMessage @event);
-        void PersistSnapshot(string actorName, int eventIndex, IMessage snapshot);
-        void Restart();
+        Task GetEventsAsync(string actorName, ulong eventIndexStart, Action<object> callback);
+        Task<Tuple<object, ulong>> GetSnapshotAsync(string actorName);
+        Task PersistEventAsync(string actorName, ulong eventIndex, object @event);
+        Task PersistSnapshotAsync(string actorName, ulong eventIndex, object snapshot);
+        Task DeleteEventsAsync(string actorName, ulong fromEventIndex);
+        Task DeleteSnapshotsAsync(string actorName, ulong fromEventIndex);
     }
 }

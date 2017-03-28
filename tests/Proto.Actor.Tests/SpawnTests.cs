@@ -5,7 +5,7 @@
 // -----------------------------------------------------------------------
 
 using Xunit;
-using static Proto.Tests.ActorFixture;
+using static Proto.TestFixtures.Receivers;
 
 namespace Proto.Tests
 {

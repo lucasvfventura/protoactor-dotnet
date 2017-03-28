@@ -24,7 +24,23 @@ namespace Proto.Mailbox
         void Start();
     }
 
-    public class DefaultMailbox : IMailbox
+    internal static class BoundedMailbox
+    {
+        public static IMailbox Create(int size, params IMailboxStatistics[] stats)
+        {
+            return new DefaultMailbox(new UnboundedMailboxQueue(), new BoundedMailboxQueue(size), stats);
+        }
+    }
+
+    public static class UnboundedMailbox
+    {
+        public static IMailbox Create(params IMailboxStatistics[] stats)
+        {
+            return new DefaultMailbox(new UnboundedMailboxQueue(), new UnboundedMailboxQueue(), stats);
+        }
+    }
+
+    internal class DefaultMailbox : IMailbox
     {
         private readonly IMailboxStatistics[] _stats;
         private readonly IMailboxQueue _systemMessages;
@@ -35,11 +51,13 @@ namespace Proto.Mailbox
         private int _status = MailboxStatus.Idle;
         private bool _suspended;
 
+        internal int Status => _status;
+
         public DefaultMailbox(IMailboxQueue systemMessages, IMailboxQueue userMailbox, params IMailboxStatistics[] stats)
         {
             _systemMessages = systemMessages;
             _userMailbox = userMailbox;
-            _stats = stats ?? Array.Empty<IMailboxStatistics>();
+            _stats = stats ?? new IMailboxStatistics[0];
         }
 
         public void PostUserMessage(object msg)
@@ -55,6 +73,10 @@ namespace Proto.Mailbox
         public void PostSystemMessage(object msg)
         {
             _systemMessages.Push(msg);
+            for (var i = 0; i < _stats.Length; i++)
+            {
+                _stats[i].MessagePosted(msg);
+            }
             Schedule();
         }
 
@@ -72,22 +94,19 @@ namespace Proto.Mailbox
             }
         }
 
-        private async Task RunAsync()
+        private Task RunAsync()
         {
-            //we follow the Go model for consistency.
-            process:
-            await ProcessMessages();
+            var done = ProcessMessages();
+
+            if (!done)
+                // mailbox is halted, awaiting completion of a message task, upon which mailbox will be rescheduled
+                return Task.FromResult(0);
 
             Interlocked.Exchange(ref _status, MailboxStatus.Idle);
 
             if (_systemMessages.HasMessages || !_suspended && _userMailbox.HasMessages)
             {
-                if (Interlocked.CompareExchange(ref _status, MailboxStatus.Busy, MailboxStatus.Idle) ==
-                    MailboxStatus.Idle)
-                {
-                    await Task.Yield();
-                    goto process;
-                }
+                Schedule();
             }
             else
             {
@@ -96,42 +115,62 @@ namespace Proto.Mailbox
                     _stats[i].MailboxEmpty();
                 }
             }
+            return Task.FromResult(0);
         }
 
-        //TODO: we can gain a good 10% perf by not having async here.
-        //but then we need some way to deal with non completed tasks, and handle mailbox idle/busy state for those
-        private async Task ProcessMessages()
+        private bool ProcessMessages()
         {
-            var t = _dispatcher.Throughput;
-            object message = null;
+            object msg = null;
             try
             {
-                for (var i = 0; i < t; i++)
+                for (var i = 0; i < _dispatcher.Throughput; i++)
                 {
-                    var sys = _systemMessages.Pop();
-                    message = sys;
-                    if (sys != null)
+                    if ((msg = _systemMessages.Pop()) != null)
                     {
-                        if (sys is SuspendMailbox)
+                        if (msg is SuspendMailbox)
                         {
                             _suspended = true;
                         }
-                        if (sys is ResumeMailbox)
+                        if (msg is ResumeMailbox)
                         {
                             _suspended = false;
                         }
-                        await _invoker.InvokeSystemMessageAsync(sys);
+                        var t = _invoker.InvokeSystemMessageAsync(msg);
+                        if (t.IsFaulted)
+                        {
+                            _invoker.EscalateFailure(t.Exception, msg);
+                            continue;
+                        }
+                        if (!t.IsCompleted)
+                        {
+                            // if task didn't complete immediately, halt processing and reschedule a new run when task completes
+                            t.ContinueWith(RescheduleOnTaskComplete, msg);
+                            return false;
+                        }
+                        for (var si = 0; si < _stats.Length; si++)
+                        {
+                            _stats[si].MessageReceived(msg);
+                        }
                         continue;
                     }
                     if (_suspended)
                     {
                         break;
                     }
-                    var msg = _userMailbox.Pop();
-                    if (msg != null)
+                    if ((msg = _userMailbox.Pop()) != null)
                     {
-                        message = msg;
-                        await _invoker.InvokeUserMessageAsync(msg);
+                        var t = _invoker.InvokeUserMessageAsync(msg);
+                        if (t.IsFaulted)
+                        {
+                            _invoker.EscalateFailure(t.Exception, msg);
+                            continue;
+                        }
+                        if (!t.IsCompleted)
+                        {
+                            // if task didn't complete immediately, halt processing and reschedule a new run when task completes
+                            t.ContinueWith(RescheduleOnTaskComplete, msg);
+                            return false;
+                        }
                         for (var si = 0; si < _stats.Length; si++)
                         {
                             _stats[si].MessageReceived(msg);
@@ -143,11 +182,29 @@ namespace Proto.Mailbox
                     }
                 }
             }
-            catch (Exception x)
+            catch (Exception e)
             {
-                _invoker.EscalateFailure(x, message);
+                _invoker.EscalateFailure(e, msg);
             }
+            return true;
         }
+
+        private void RescheduleOnTaskComplete(Task task, object message)
+        {
+            if (task.IsFaulted)
+            {
+                _invoker.EscalateFailure(task.Exception, message);
+            }
+            else
+            {
+                for (var si = 0; si < _stats.Length; si++)
+                {
+                    _stats[si].MessageReceived(message);
+                }
+            }
+            _dispatcher.Schedule(RunAsync);
+        }
+
 
         protected void Schedule()
         {
@@ -158,11 +215,26 @@ namespace Proto.Mailbox
         }
     }
 
+    /// <summary>
+    /// Extension point for getting notifications about mailbox events
+    /// </summary>
     public interface IMailboxStatistics
     {
+        /// <summary>
+        /// This method is invoked when the mailbox is started
+        /// </summary>
         void MailboxStarted();
+        /// <summary>
+        /// This method is invoked when a message is posted to the mailbox.
+        /// </summary>
         void MessagePosted(object message);
+        /// <summary>
+        /// This method is invoked when a message has been received by the invoker associated with the mailbox.
+        /// </summary>
         void MessageReceived(object message);
+        /// <summary>
+        /// This method is invoked when all messages in the mailbox have been received.
+        /// </summary>
         void MailboxEmpty();
     }
 }
